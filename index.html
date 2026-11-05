@@ -468,54 +468,6 @@ function subscribeData() {
     render();
   }));
 }
-// --- QUEST & PAYOUT & NOTIFICATION ACTIONS ---
-window.addQuest = async () => {
-  const title = ($("#q-title")?.value || "").trim();
-  const reward = parseInt($("#q-reward")?.value, 10);
-  const icon = $("#q-icon")?.value || "🧹";
-  const childId = $("#q-child")?.value || "all";
-  const repeat = $("#q-repeat")?.value || "daily";
-  const dueTime = $("#q-duetime")?.value || ""; // 수행 / 마감 시간
-
-  if (!title || isNaN(reward) || reward <= 0) {
-    toast("퀘스트 제목과 유효한 보상 금액을 입력해 주세요.");
-    return;
-  }
-
-  const newQuest = {
-    parentId: State.me.uid,
-    title, reward, icon, childId, repeat, dueTime,
-    ts: Date.now()
-  };
-
-  const docRef = await addDoc(collection(db, "quests"), newQuest);
-
-  // 대상 자녀들에게 사전 알림 메시지 발송
-  const targetKids = childId === "all" ? State.kids : State.kids.filter(k => k.id === childId);
-  for (const kid of targetKids) {
-    await addDoc(collection(db, "notifications"), {
-      targetId: kid.id,
-      senderName: State.me.name,
-      type: "new_quest",
-      title: `✨ 새로운 퀘스트 등록!`,
-      message: `"${title}" 퀘스트가 등록되었어요.${dueTime ? ` (시간: ${dueTime})` : ''}`,
-      ts: Date.now(),
-      read: false
-    });
-  }
-
-  $("#q-title").value = "";
-  $("#q-reward").value = "";
-  $("#q-duetime").value = "";
-  toast("새 퀘스트 등록 및 자녀 알림 발송 완료! ✨");
-};
-
-    unsubs.push(onSnapshot(query(collection(db, "notifications"), where("targetId", "==", uid)), sn => {
-      State.notifications = sn.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (b.ts||0) - (a.ts||0));
-      render();
-    }));
-  }
-}
 
 // App Initialization Bootstrapping
 async function boot(user) {
