@@ -388,7 +388,8 @@ let State = {
   authRole: "parent", // 'parent', 'child'
   err: "",
   busy: false,
-  modal: null // modal state
+  modal: null, // modal state
+  notifications: [] // 실시간 알림 데이터
 };
 
 let unsubs = [];
@@ -460,25 +461,77 @@ function subscribeData() {
       render();
     }));
   }
+
+  // 내 수신 알림 실시간 구독
+  unsubs.push(onSnapshot(query(collection(db, "notifications"), where("targetId", "==", uid)), sn => {
+    State.notifications = sn.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (b.ts||0) - (a.ts||0));
+    render();
+  }));
+}
+// --- QUEST & PAYOUT & NOTIFICATION ACTIONS ---
+window.addQuest = async () => {
+  const title = ($("#q-title")?.value || "").trim();
+  const reward = parseInt($("#q-reward")?.value, 10);
+  const icon = $("#q-icon")?.value || "🧹";
+  const childId = $("#q-child")?.value || "all";
+  const repeat = $("#q-repeat")?.value || "daily";
+  const dueTime = $("#q-duetime")?.value || ""; // 수행 / 마감 시간
+
+  if (!title || isNaN(reward) || reward <= 0) {
+    toast("퀘스트 제목과 유효한 보상 금액을 입력해 주세요.");
+    return;
+  }
+
+  const newQuest = {
+    parentId: State.me.uid,
+    title, reward, icon, childId, repeat, dueTime,
+    ts: Date.now()
+  };
+
+  const docRef = await addDoc(collection(db, "quests"), newQuest);
+
+  // 대상 자녀들에게 사전 알림 메시지 발송
+  const targetKids = childId === "all" ? State.kids : State.kids.filter(k => k.id === childId);
+  for (const kid of targetKids) {
+    await addDoc(collection(db, "notifications"), {
+      targetId: kid.id,
+      senderName: State.me.name,
+      type: "new_quest",
+      title: `✨ 새로운 퀘스트 등록!`,
+      message: `"${title}" 퀘스트가 등록되었어요.${dueTime ? ` (시간: ${dueTime})` : ''}`,
+      ts: Date.now(),
+      read: false
+    });
+  }
+
+  $("#q-title").value = "";
+  $("#q-reward").value = "";
+  $("#q-duetime").value = "";
+  toast("새 퀘스트 등록 및 자녀 알림 발송 완료! ✨");
+};
+
+    unsubs.push(onSnapshot(query(collection(db, "notifications"), where("targetId", "==", uid)), sn => {
+      State.notifications = sn.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (b.ts||0) - (a.ts||0));
+      render();
+    }));
+  }
 }
 
-// App Initialization Bootstrapper
+// App Initialization Bootstrapping
 async function boot(user) {
+  clearSubscribers();
   State.authUser = user;
-  State.err = "";
-  try {
-    const docRef = doc(db, "users", user.uid);
-    const sn = await getDoc(docRef);
 
-    if (!sn.exists()) {
-      // New user registration flow required (especially for Google Sign In first time)
+  try {
+    const userDoc = await getDoc(doc(db, "users", user.uid));
+    if (!userDoc.exists()) {
       State.me = null;
       State.authMode = "setup_profile";
       render();
       return;
     }
 
-    State.me = { uid: user.uid, ...sn.data() };
+    State.me = { uid: user.uid, ...userDoc.data() };
     State.authMode = "logged_in";
     subscribeData();
     render();
@@ -699,28 +752,69 @@ window.unlinkChild = async (childId) => {
   }
 };
 
-// --- QUEST & PAYOUT ACTIONS ---
+// --- QUEST & PAYOUT & NOTIFICATION ACTIONS ---
 window.addQuest = async () => {
   const title = ($("#q-title")?.value || "").trim();
   const reward = parseInt($("#q-reward")?.value, 10);
   const icon = $("#q-icon")?.value || "🧹";
   const childId = $("#q-child")?.value || "all";
   const repeat = $("#q-repeat")?.value || "daily";
+  const dueTime = ($("#q-duetime")?.value || "").trim();
 
   if (!title || isNaN(reward) || reward <= 0) {
     toast("퀘스트 제목과 유효한 보상 금액을 입력해 주세요.");
     return;
   }
 
-  await addDoc(collection(db, "quests"), {
+  const newQuest = {
     parentId: State.me.uid,
-    title, reward, icon, childId, repeat,
+    title, reward, icon, childId, repeat, dueTime,
     ts: Date.now()
+  };
+
+  await addDoc(collection(db, "quests"), newQuest);
+
+  // 대상 자녀들에게 사전 알림 메시지 발송
+  const targetKids = childId === "all" ? State.kids : State.kids.filter(k => k.id === childId);
+  for (const kid of targetKids) {
+    await addDoc(collection(db, "notifications"), {
+      targetId: kid.id,
+      senderName: State.me.name,
+      type: "new_quest",
+      title: `✨ 새로운 퀘스트 등록!`,
+      message: `"${title}" 퀘스트가 등록되었어요.${dueTime ? ` (시간: ${dueTime})` : ''}`,
+      ts: Date.now(),
+      read: false
+    });
+  }
+
+  if ($("#q-title")) $("#q-title").value = "";
+  if ($("#q-reward")) $("#q-reward").value = "";
+  if ($("#q-duetime")) $("#q-duetime").value = "";
+  toast("새 퀘스트 등록 및 자녀 알림 발송 완료! ✨");
+};
+
+// 부모가 자녀에게 직접 알림/콕 찌르기 메시지 보내기
+window.sendDirectNotification = async (targetChildId) => {
+  const child = State.kids.find(k => k.id === targetChildId);
+  const msg = prompt(`${child ? child.name : '자녀'}에게 보낼 알림 메시지를 입력하세요:`, "오늘 할일 퀘스트 잊지 말고 해보자! 🔥");
+  if (!msg || !msg.trim()) return;
+
+  await addDoc(collection(db, "notifications"), {
+    targetId: targetChildId,
+    senderName: State.me.name,
+    type: "poke",
+    title: `👉 ${State.me.name} 부모님의 콕! 찌르기 알림`,
+    message: msg.trim(),
+    ts: Date.now(),
+    read: false
   });
 
-  $("#q-title").value = "";
-  $("#q-reward").value = "";
-  toast("새로운 퀘스트를 등록했어요! ✨");
+  toast("자녀에게 direct 알림을 보냈습니다! 📲");
+};
+
+window.markNotificationRead = async (id) => {
+  await updateDoc(doc(db, "notifications", id), { read: true });
 };
 
 window.deleteQuest = async (id) => {
@@ -982,7 +1076,7 @@ function renderParentView() {
         <h3>✨ 새 퀘스트 만들기</h3>
         <div class="row">
           <select id="q-icon" class="fit" style="width:75px;">${ICONS.map(i => `<option value="${i}">${i}</option>`).join("")}</select>
-          <input id="q-title" placeholder="퀘스트 제목 (예: 방 청소하기, 학습지 풀기)">
+          <input id="q-title" placeholder="퀘스트 제목 (예: 방 청소하기)">
         </div>
         <div class="row">
           <input id="q-reward" type="number" step="100" placeholder="보상 금액 (원)">
@@ -991,12 +1085,15 @@ function renderParentView() {
             <option value="once">한 번만</option>
           </select>
         </div>
+        <div class="row">
+          <input id="q-duetime" placeholder="수행/마감시간 (예: 18:00까지, 08:00~09:00)">
+        </div>
         <label style="font-size:13px; font-weight:bold;">대상 자녀 선택</label>
         <select id="q-child">
           <option value="all">모든 자녀</option>
           ${State.kids.map(k => `<option value="${k.id}">${esc(k.name)}만</option>`).join("")}
         </select>
-        <button class="btn-mint" style="width:100%; margin-top:4px;" onclick="addQuest()">퀘스트 등록하기</button>
+        <button class="btn-mint" style="width:100%; margin-top:4px;" onclick="addQuest()">퀘스트 등록 및 알림 보내기</button>
       </div>
 
       <h3 style="margin:16px 4px 8px;">📋 등록된 퀘스트 목록 (${State.quests.length})</h3>
@@ -1010,7 +1107,10 @@ function renderParentView() {
           <div class="quest-icon">${esc(q.icon)}</div>
           <div style="flex:1;">
             <div class="quest-title">${esc(q.title)}</div>
-            <div class="text-muted">${q.repeat === 'once' ? '1회성' : '매일 수행 가능'} · 대상: ${esc(getChildName(q.childId))}</div>
+            <div class="text-muted">
+              ${q.repeat === 'once' ? '1회성' : '매일'} · 대상: ${esc(getChildName(q.childId))}
+              ${q.dueTime ? `<br><span style="color:#E67E22;">⏰ 시간: ${esc(q.dueTime)}</span>` : ''}
+            </div>
             <div class="amount-won">${won(q.reward)}</div>
           </div>
           <button class="btn-ghost fit" onclick="deleteQuest('${q.id}')">🗑️</button>
@@ -1026,14 +1126,13 @@ function renderParentView() {
         <h3>🔗 자녀 연동 초대 코드</h3>
         <p class="text-muted" style="margin-top:-4px;">자녀가 로그인 후 아래 코드를 입력하면 자동 연동됩니다.</p>
         <div class="invite-code-box">${esc(State.me.code || 'CODE')}</div>
-        <div class="text-muted" style="text-align:center; font-size:12px;">이메일(${esc(State.me.email)}) 또는 연락처(${esc(State.me.phone || '미등록')})로도 검색 연동 가능</div>
       </div>
 
       <h3 style="margin:16px 4px 8px;">🧒 연동된 자녀 목록 (${State.kids.length})</h3>
     `;
 
     if (State.kids.length === 0) {
-      body += `<div class="card empty-state">아직 연동된 자녀가 없습니다.<br>자녀 앱에서 초대 코드를 입력하도록 해주세요!</div>`;
+      body += `<div class="card empty-state">아직 연동된 자녀가 없습니다.</div>`;
     } else {
       body += State.kids.map(k => {
         const lv = getLevelInfo(k.id);
@@ -1046,27 +1145,13 @@ function renderParentView() {
                 <div class="text-muted">${esc(k.email || k.phone || '계정 정보 없음')}</div>
               </div>
               <div style="text-align:right;">
-                <div class="text-muted" style="font-size:11px;">지급 대기 잔액</div>
                 <div class="amount-won" style="font-size:22px;">${won(bal)}</div>
               </div>
             </div>
 
-            <div style="margin:10px 0 4px;">
-              <div class="row" style="font-size:13px; margin-bottom:2px;">
-                <span><b>Lv.${lv.lv}</b> ${lv.title}</span>
-                <span class="fit text-muted">총 완료 ${lv.count}회</span>
-              </div>
-              <div class="progress-bar"><i style="width:${lv.progress}%"></i></div>
-            </div>
-
-            <div class="row text-muted" style="font-size:12px; margin:8px 0;">
-              <span>누적 획득: ${won(getEarned(k.id))}</span>
-              <span>누적 지급 완료: ${won(getPaid(k.id))}</span>
-            </div>
-
             <div class="row" style="margin-top:10px;">
-              <button class="btn-ghost fit" style="padding:8px 12px; font-size:13px; color:#c0392b;" onclick="unlinkChild('${k.id}')">연동 해제</button>
-              <button class="btn-mint" onclick="recordPayout('${k.id}')">💵 용돈 지급 완료 기록</button>
+              <button class="btn-yellow fit" style="font-size:13px;" onclick="sendDirectNotification('${k.id}')">📲 콕! 찌르기 알림 보내기</button>
+              <button class="btn-mint" onclick="recordPayout('${k.id}')">💵 용돈 지급</button>
             </div>
           </div>
         `;
@@ -1152,35 +1237,53 @@ function renderChildView() {
       <div class="row">
         <div style="text-align:left;">
           <h2>🧒 ${esc(State.me.name)}</h2>
-          <div style="font-size:13px; font-weight:bold;">${lv.title}</div>
+          <div style="font-size:14px; font-weight:bold; color:var(--primary-ink);">${lv.title} (Lv.${lv.lv})</div>
         </div>
         <div style="text-align:right;">
-          <div style="font-size:12px; opacity:0.9;">현재 보유 용돈</div>
-          <div class="amount-won" style="font-size:26px; color:#FFF; text-shadow:1px 1px 0 #000;">💰 ${won(myBalance)}</div>
+          <div style="font-size:13px; color:var(--primary-ink); font-weight:500;">보유 중인 용돈</div>
+          <div class="amount-won" style="font-size:26px; color:var(--primary-ink);">💰 ${won(myBalance)}</div>
         </div>
       </div>
-
-      <div style="margin-top:10px;">
-        <div class="row" style="font-size:12px; margin-bottom:3px; color:var(--primary-ink);">
-          <span><b>레벨 ${lv.lv}</b> 경험치</span>
-          <span>다음 레벨까지 (${lv.count % 5}/5)</span>
-        </div>
-        <div class="progress-bar"><i style="width:${lv.progress}%"></i></div>
+      <div class="progress-bar" style="margin-top:12px;" title="다음 레벨까지">
+        <i style="width:${lv.progress}%"></i>
       </div>
+      <div style="font-size:12px; margin-top:4px; text-align:right; font-weight:500;">성공한 퀘스트: ${lv.count}개</div>
     </div>
   `;
 
-  // TAB: Perform Quests
+  // TAB: Perform Quests (Child View)
   if (State.tab === "home") {
-    body += `<h3 style="margin:12px 4px;">⚔️ 오늘 수행 가능한 퀘스트 (${availableQuests.length})</h3>`;
+    const unreadNotifs = State.notifications.filter(n => !n.read);
+
+    body += `
+      ${unreadNotifs.length > 0 ? `
+        <div class="card" style="background:#FFF9E6; border-color:#F39C12;">
+          <h3 style="color:#D35400;">🔔 부모님으로부터 온 알림 (${unreadNotifs.length})</h3>
+          ${unreadNotifs.map(n => `
+            <div style="padding:8px 0; border-bottom:1px dashed #F39C12;" class="row">
+              <div style="flex:1;">
+                <b>${esc(n.title)}</b>
+                <div style="font-size:13px; margin-top:2px;">${esc(n.message)}</div>
+                <div class="text-muted" style="font-size:11px;">${new Date(n.ts).toLocaleTimeString()}</div>
+              </div>
+              <button class="btn-ghost fit" style="font-size:12px; padding:4px 8px;" onclick="markNotificationRead('${n.id}')">확인 완료</button>
+            </div>
+          `).join("")}
+        </div>
+      ` : ''}
+
+      <h3 style="margin:12px 4px;">⚔️ 오늘 수행 가능한 퀘스트 (${availableQuests.length})</h3>
+    `;
+
     if (availableQuests.length === 0) {
-      body += `<div class="card empty-state">🎉 멋져요! 오늘 수행할 수 있는 퀘스트를 모두 마쳤거나 부모님이 등록한 퀘스트가 없습니다.</div>`;
+      body += `<div class="card empty-state">🎉 오늘 할 수 있는 퀘스트를 모두 마쳤거나 등록된 퀘스트가 없습니다!</div>`;
     } else {
       body += availableQuests.map(q => `
         <div class="card quest-item">
           <div class="quest-icon">${esc(q.icon)}</div>
           <div style="flex:1;">
             <div class="quest-title">${esc(q.title)}</div>
+            ${q.dueTime ? `<div style="font-size:12px; font-weight:bold; color:#E67E22; margin-top:2px;">⏰ 마감/수행 시간: ${esc(q.dueTime)}</div>` : ''}
             <div class="amount-won">+${won(q.reward)}</div>
           </div>
           <button class="btn-mint fit" onclick="submitQuestReport('${q.id}')">했어요! 🖐️</button>
@@ -1269,15 +1372,17 @@ function renderChildView() {
 
 // 6. Modal Renderer
 function renderModal() {
+  if (!State.modal) return "";
+
   if (State.modal === "edit_profile") {
     return `
-      <div class="modal-overlay" onclick="closeModal()">
-        <div class="modal-content" onclick="event.stopPropagation()">
-          <h3>⚙️ 프로필 수정</h3>
-          <label style="font-size:13px; font-weight:bold; margin-top:10px; display:block;">이름 / 닉네임</label>
-          <input id="mod-name" value="${esc(State.me.name)}">
+      <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
+        <div class="modal-content">
+          <h3 style="margin-bottom:12px;">⚙️ 프로필 정보 수정</h3>
+          <label style="font-size:13px; font-weight:bold;">이름 / 닉네임</label>
+          <input id="mod-name" value="${esc(State.me.name || '')}" placeholder="이름을 입력하세요">
           
-          <label style="font-size:13px; font-weight:bold; display:block;">연락처 (전화번호)</label>
+          <label style="font-size:13px; font-weight:bold;">연락처 (선택)</label>
           <input id="mod-phone" type="tel" value="${esc(State.me.phone || '')}" placeholder="010-0000-0000">
 
           <div class="row" style="margin-top:14px;">
@@ -1288,28 +1393,29 @@ function renderModal() {
       </div>
     `;
   }
-  return '';
+  return "";
 }
 
-// --- MAIN RENDER ROUTER ---
+// Main Render Dispatcher
 function render() {
-  const container = $("#app");
-  let content = "";
+  const app = $("#app");
+  if (!app) return;
 
-  if (!State.authUser && State.authMode !== "setup_profile") {
-    content = renderAuthView();
-  } else if (State.authMode === "setup_profile" || !State.me) {
+  let content = "";
+  if (State.authMode === "setup_profile") {
     content = renderProfileSetupView();
+  } else if (!State.me) {
+    content = renderAuthView();
   } else if (State.me.role === "parent") {
     content = renderParentView();
-  } else { // Child role
+  } else {
     content = State.me.parentId ? renderChildView() : renderChildConnectView();
   }
 
-  container.innerHTML = content + renderModal();
+  app.innerHTML = content + renderModal();
 }
 
-// Initial Trigger
+// Initial Call
 render();
 </script>
 </body>
