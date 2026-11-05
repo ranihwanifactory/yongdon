@@ -466,6 +466,8 @@ function subscribeData() {
   unsubs.push(onSnapshot(query(collection(db, "notifications"), where("targetId", "==", uid)), sn => {
     State.notifications = sn.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (b.ts||0) - (a.ts||0));
     render();
+  }, err => {
+    console.error("Notifications sub error:", err);
   }));
 }
 
@@ -746,33 +748,40 @@ window.addQuest = async () => {
   toast("새 퀘스트 등록 및 자녀 알림 발송 완료! ✨");
 };
 
+window.deleteQuest = async (questId) => {
+  if (confirm("이 퀘스트를 삭제하시겠습니까?")) {
+    await deleteDoc(doc(db, "quests", questId));
+    toast("퀘스트가 삭제되었습니다.");
+  }
+};
+
+window.markNotificationRead = async (notifId) => {
+  await updateDoc(doc(db, "notifications", notifId), { read: true });
+};
+
 // 부모가 자녀에게 직접 알림/콕 찌르기 메시지 보내기
 window.sendDirectNotification = async (targetChildId) => {
   const child = State.kids.find(k => k.id === targetChildId);
-  const msg = prompt(`${child ? child.name : '자녀'}에게 보낼 알림 메시지를 입력하세요:`, "오늘 할일 퀘스트 잊지 말고 해보자! 🔥");
+  const targetName = child ? child.name : '자녀';
+  const msg = prompt(`${targetName}에게 보낼 알림 메시지를 입력하세요:`, "오늘 할일 퀘스트 잊지 말고 해보자! 🔥");
   if (!msg || !msg.trim()) return;
 
-  await addDoc(collection(db, "notifications"), {
-    targetId: targetChildId,
-    senderName: State.me.name,
-    type: "poke",
-    title: `👉 ${State.me.name} 부모님의 콕! 찌르기 알림`,
-    message: msg.trim(),
-    ts: Date.now(),
-    read: false
-  });
+  try {
+    await addDoc(collection(db, "notifications"), {
+      targetId: targetChildId,
+      senderId: State.me.uid,
+      senderName: State.me.name,
+      type: "poke",
+      title: `👉 ${State.me.name} 부모님의 콕! 찌르기 알림`,
+      message: msg.trim(),
+      ts: Date.now(),
+      read: false
+    });
 
-  toast("자녀에게 direct 알림을 보냈습니다! 📲");
-};
-
-window.markNotificationRead = async (id) => {
-  await updateDoc(doc(db, "notifications", id), { read: true });
-};
-
-window.deleteQuest = async (id) => {
-  if (confirm("이 퀘스트를 삭제할까요?")) {
-    await deleteDoc(doc(db, "quests", id));
-    toast("퀘스트가 삭제되었습니다.");
+    toast(`${targetName}에게 알림 메시지를 보냈습니다! 📲`);
+  } catch (e) {
+    console.error("Notification error:", e);
+    toast("알림 전송 실패: " + e.message);
   }
 };
 
@@ -780,8 +789,8 @@ window.submitQuestReport = async (questId) => {
   const quest = State.quests.find(q => q.id === questId);
   if (!quest) return;
 
-  const memo = prompt("부모님께 전달할 완료 한마디 (선택사항):", "") ?? null;
-  if (memo === null) return; // Cancelled
+  const memo = prompt("부모님께 전달할 한마디 (선택사항)", "") ?? null;
+  if (memo === null) return; // 취소 클릭 시
 
   await addDoc(collection(db, "reports"), {
     parentId: State.me.parentId,
@@ -790,7 +799,7 @@ window.submitQuestReport = async (questId) => {
     questId: quest.id,
     title: quest.title,
     icon: quest.icon,
-    reward: quest.reward,
+    reward: Number(quest.reward),
     memo: memo.trim(),
     status: "pending",
     ts: Date.now()
@@ -799,283 +808,258 @@ window.submitQuestReport = async (questId) => {
   // 부모님에게 완료 보고 알림 전송
   await addDoc(collection(db, "notifications"), {
     targetId: State.me.parentId,
+    senderId: State.me.uid,
     senderName: State.me.name,
-    type: "report_submitted",
-    title: `🖐️ ${State.me.name} 자녀의 퀘스트 완료 보고!`,
-    message: `"${quest.title}" 퀘스트를 수행했어요. 승인을 확인해 주세요.${memo.trim() ? ` (메시지: ${memo.trim()})` : ''}`,
+    type: "report",
+    title: `🖐️ ${State.me.name}의 퀘스트 완료 보고!`,
+    message: `"${quest.title}" (${won(quest.reward)}) 보고가 도착했어요.${memo ? ` ("${memo}")` : ''}`,
     ts: Date.now(),
     read: false
   });
 
-  toast("부모님께 퀘스트 완료 보고서와 알림을 보냈어요! ⏳");
+  toast("부모님께 성공적으로 보고했습니다! 승인을 기다려주세요 ⏳");
 };
 
-window.reviewReport = async (reportId, status) => {
+window.reviewReport = async (reportId, newStatus) => {
   const report = State.reports.find(r => r.id === reportId);
-
   await updateDoc(doc(db, "reports", reportId), {
-    status,
+    status: newStatus,
     reviewedAt: Date.now()
   });
 
   if (report) {
-    // 자녀에게 승인/반려 처리 알림 전송
+    const isApproved = newStatus === "approved";
+    // 자녀에게 알림 전송
     await addDoc(collection(db, "notifications"), {
       targetId: report.childId,
+      senderId: State.me.uid,
       senderName: State.me.name,
-      type: "report_reviewed",
-      title: status === "approved" ? "🎉 퀘스트 승인 완료!" : "😅 퀘스트 검토 결과",
-      message: status === "approved" 
-        ? `"${report.title}" 퀘스트가 승인되어 ${won(report.reward)}의 보상이 쌓였어요!` 
-        : `"${report.title}" 퀘스트가 반려되었어요. 다시 확인해 보세요.`,
+      type: "review",
+      title: isApproved ? "🎉 퀘스트 승인 완료!" : "💬 퀘스트 재검토 요청",
+      message: isApproved 
+        ? `"${report.title}" 퀘스트가 승인되어 ${won(report.reward)}이/가 적립되었습니다!` 
+        : `"${report.title}" 퀘스트를 다시 확인해 주세요.`,
       ts: Date.now(),
       read: false
     });
-  }
 
-  if (status === "approved") {
-    triggerConfetti();
-    toast("퀘스트 완료를 승인했습니다! 보상이 지급되었습니다. 💰");
-  } else {
-    toast("퀘스트 완료 보고를 반려하였습니다.");
+    if (isApproved) {
+      toast("승인 완료! 보상을 지급했습니다 💰");
+      triggerConfetti();
+    } else {
+      toast("반려 메시지를 전달했습니다.");
+    }
   }
 };
 
 window.recordPayout = async (childId) => {
   const currentBal = getBalance(childId);
   if (currentBal <= 0) {
-    toast("지급할 남아있는 용돈 잔액이 없습니다.");
+    toast("지급할 잔액이 없습니다.");
     return;
   }
 
-  const inputVal = prompt(`지급할 용돈 금액을 입력하세요 (현재 미지급 잔액: ${won(currentBal)})`, currentBal);
+  const inputVal = prompt(`자녀에게 실제로 지급한 용돈 금액을 입력하세요 (현재 미지급 잔액: ${won(currentBal)})`, currentBal);
   if (!inputVal) return;
-  const amount = parseInt(inputVal, 10);
 
-  if (isNaN(amount) || amount <= 0 || amount > currentBal) {
-    toast("올바른 금액을 입력해주세요. (현재 잔액 이하)");
+  const payAmount = parseInt(inputVal, 10);
+  if (isNaN(payAmount) || payAmount <= 0) {
+    toast("유효한 금액을 입력해 주세요.");
+    return;
+  }
+  if (payAmount > currentBal) {
+    toast("현재 남아있는 용돈 잔액보다 큰 금액을 기록할 수 없습니다.");
     return;
   }
 
   await addDoc(collection(db, "payouts"), {
     parentId: State.me.uid,
-    childId,
-    amount,
+    childId: childId,
+    amount: payAmount,
     ts: Date.now()
   });
 
-  toast("용돈 지급 완료 기록을 저장했습니다! 🎉");
+  // 자녀에게 용돈 지급 알림 전송
+  await addDoc(collection(db, "notifications"), {
+    targetId: childId,
+    senderId: State.me.uid,
+    senderName: State.me.name,
+    type: "payout",
+    title: `💵 용돈 지급 완료!`,
+    message: `부모님이 ${won(payAmount)}의 용돈을 지급하셨습니다.`,
+    ts: Date.now(),
+    read: false
+  });
+
+  toast("용돈 지급 기록을 등록했습니다! 💸");
 };
 
-// Profile Update Modal Action
-window.updateProfile = async () => {
-  const name = ($("#mod-name")?.value || "").trim();
-  const phone = formatPhone(($("#mod-phone")?.value || "").trim());
-
-  if (!name) { toast("이름을 입력해 주세요."); return; }
-
-  await updateDoc(doc(db, "users", State.me.uid), { name, phone });
-  State.me.name = name;
-  State.me.phone = phone;
-  closeModal();
-  toast("프로필이 수정되었습니다.");
-  render();
+// 퀘스트 수행 가능 여부 검사
+const isQuestAvailable = q => {
+  if (q.childId !== "all" && q.childId !== State.me.uid) return false;
+  const reports = State.reports.filter(r => r.questId === q.id && r.status !== "rejected");
+  if (q.repeat === "once") return reports.length === 0;
+  return !reports.some(r => new Date(r.ts).toDateString() === todayStr());
 };
 
-window.openEditProfileModal = () => {
-  State.modal = "edit_profile";
-  render();
-};
+// --- RENDER VIEWS ---
+function getAuthView() {
+  const mode = State.authMode;
 
-window.closeModal = () => {
-  State.modal = null;
-  render();
-};
+  if (mode === "setup_profile") {
+    return `
+      <div class="card card-hero">
+        <h1>👤 프로필 추가 설정</h1>
+        <p style="margin-top:6px">소셜 로그인 성공! 부모/자녀 역할 및 연락처를 설정해주세요.</p>
+      </div>
+      <div class="card">
+        <label><b>역할 선택</b></label>
+        <div class="row" style="margin:8px 0 14px">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="radio" name="p-role" value="parent" checked> 👨‍👩‍👧 부모님
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="radio" name="p-role" value="child"> 🧒 자녀
+          </label>
+        </div>
+        <label><b>이름 / 닉네임</b></label>
+        <input id="p-name" placeholder="예: 엄마, 아빠, 민준" value="${esc(State.authUser?.displayName || '')}">
+        
+        <label><b>연락처 (휴대폰 번호)</b></label>
+        <input id="p-phone" placeholder="010-0000-0000">
 
-window.setAuthMode = (mode) => { State.authMode = mode; State.err = ""; render(); };
-window.setAuthRole = (role) => { State.authRole = role; render(); };
-window.setTab = (tab) => { State.tab = tab; render(); };
+        <div class="err-msg">${esc(State.err)}</div>
+        <button class="btn-mint" style="width:100%" onclick="handleSetupProfile()" ${State.busy ? 'disabled' : ''}>프로필 저장 및 시작하기</button>
+      </div>
+    `;
+  }
 
-// --- VIEWS & TEMPLATES ---
-
-// 1. Auth & Sign In/Up View
-function renderAuthView() {
-  const isSignup = State.authMode === "signup";
+  const isSignup = mode === "signup";
   return `
     <div class="card card-hero">
-      <h1 style="font-size:32px; color:var(--primary-ink);">🪙 용돈 퀘스트</h1>
-      <p style="margin: 6px 0 0; font-weight:500;">스스로 정돈하고, 당당하게 받는 우리아이 용돈 관리</p>
+      <h1>🪙 용돈 퀘스트</h1>
+      <p style="margin-top:6px">즐거운 할일 수행 & Smart 용돈 관리 앱</p>
     </div>
-
     <div class="card">
-      ${isSignup ? `
-        <div class="row" style="margin-bottom:12px;">
-          <button class="${State.authRole === 'parent' ? 'btn-yellow' : 'btn-ghost'}" onclick="setAuthRole('parent')">👨‍👩‍👧 부모 가입</button>
-          <button class="${State.authRole === 'child' ? 'btn-yellow' : 'btn-ghost'}" onclick="setAuthRole('child')">🧒 자녀 가입</button>
-        </div>
-        <input id="f-name" placeholder="성함 / 이름 (예: 엄마, 민준)">
-        <input id="f-phone" type="tel" placeholder="연락처 (선택사항 - 연동 시 활용)">
-      ` : `<h2 style="margin-bottom:12px; text-align:center;">로그인</h2>`}
+      <button class="btn-google" onclick="handleGoogleLogin()">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
+        구글 계정으로 로그인 / 가입
+      </button>
 
-      <input id="f-id" placeholder="${State.authRole === 'child' && isSignup ? '아이디 또는 이메일' : '이메일 주소'}" autocomplete="username">
+      <div style="display:flex;align-items:center;margin:16px 0;gap:8px">
+        <hr style="flex:1;border:none;border-top:1px solid #ddd">
+        <span style="font-size:12px;color:var(--text-muted)">또는 이메일 로그인</span>
+        <hr style="flex:1;border:none;border-top:1px solid #ddd">
+      </div>
+
+      ${isSignup ? `
+        <div class="row" style="margin-bottom:10px">
+          <button class="${State.authRole === "parent" ? "btn-yellow" : "btn-ghost"}" onclick="State.authRole='parent';render();">👨‍👩‍👧 부모 가입</button>
+          <button class="${State.authRole === "child" ? "btn-yellow" : "btn-ghost"}" onclick="State.authRole='child';render();">🧒 자녀 가입</button>
+        </div>
+        <input id="f-name" placeholder="이름 (예: 엄마, 아빠, 민준)">
+        <input id="f-phone" placeholder="휴대폰 번호 (예: 01012345678)">
+      ` : `<h2>이메일 로그인</h2>`}
+
+      <input id="f-id" placeholder="이메일 또는 아이디" autocomplete="username">
       <input id="f-pw" type="password" placeholder="비밀번호 (6자 이상)" autocomplete="current-password" onkeydown="if(event.key==='Enter')handleEmailAuth()">
 
       <div class="err-msg">${esc(State.err)}</div>
-
-      <button style="width:100%; margin-top:4px;" class="btn-mint" onclick="handleEmailAuth()" ${State.busy ? 'disabled' : ''}>
-        ${State.busy ? '처리 중...' : (isSignup ? '가입하고 시작하기' : '이메일 로그인')}
+      <button class="btn-mint" style="width:100%" onclick="handleEmailAuth()" ${State.busy ? 'disabled' : ''}>
+        ${isSignup ? "회원가입하기" : "로그인하기"}
       </button>
 
-      <div style="margin: 14px 0; text-align: center; position: relative;">
-        <hr style="border: 0; border-top: 1px solid #ddd;">
-        <span style="position: absolute; top: -10px; left: 50%; transform: translateX(-50%); background: #fff; padding: 0 10px; color: #888; font-size: 12px;">또는</span>
-      </div>
-
-      <button class="btn-google" onclick="handleGoogleLogin()">
-        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
-        Google 계정으로 로그인
-      </button>
-
-      <div style="text-align:center; margin-top:14px;">
-        ${isSignup ? 
-          `<button class="link-btn" onclick="setAuthMode('login')">이미 계정이 있으신가요? 로그인</button>` : 
-          `<button class="link-btn" onclick="setAuthMode('signup')">처음이신가요? 회원가입하기</button>`}
+      <div style="text-align:center;margin-top:10px">
+        ${isSignup ? `<button class="link-btn" onclick="State.authMode='login';State.err='';render();">이미 계정이 있으신가요? 로그인</button>` 
+                  : `<button class="link-btn" onclick="State.authMode='signup';State.err='';render();">새 이메일 계정 만들기</button>`}
       </div>
     </div>
   `;
 }
 
-// 2. Initial Profile Setup View (First Time Google Logins)
-function renderProfileSetupView() {
+function getLinkConnectView() {
   return `
     <div class="card card-hero">
-      <h2>👋 환영합니다!</h2>
-      <p style="margin-top:4px;">기본 프로필 정보를 설정해 주세요.</p>
-    </div>
-    <div class="card">
-      <label style="font-weight:bold; font-size:14px;">회원 유형 선택</label>
-      <div class="row" style="margin:8px 0 16px;">
-        <label class="card row" style="margin:0; padding:10px; cursor:pointer;">
-          <input type="radio" name="p-role" value="parent" checked style="width:auto; margin:0;"> 👨‍👩‍👧 부모님
-        </label>
-        <label class="card row" style="margin:0; padding:10px; cursor:pointer;">
-          <input type="radio" name="p-role" value="child" style="width:auto; margin:0;"> 🧒 자녀
-        </label>
-      </div>
-
-      <label style="font-weight:bold; font-size:14px;">이름 / 닉네임</label>
-      <input id="p-name" placeholder="예: 엄마, 아빠, 민준" value="${esc(State.authUser?.displayName || '')}">
-
-      <label style="font-weight:bold; font-size:14px;">연락처 (선택)</label>
-      <input id="p-phone" type="tel" placeholder="010-0000-0000">
-
-      <div class="err-msg">${esc(State.err)}</div>
-
-      <button class="btn-mint" style="width:100%" onclick="handleSetupProfile()" ${State.busy ? 'disabled' : ''}>
-        설정 완료 및 시작하기
-      </button>
-    </div>
-  `;
-}
-
-// 3. Child Unconnected View
-function renderChildConnectView() {
-  return `
-    <div class="card card-hero">
-      <h2>🔗 부모님과 계정 연동하기</h2>
-      <p style="margin-top:4px;">부모님 계정과 연결해야 퀘스트를 받고 용돈을 모을 수 있어요!</p>
+      <h1>🔗 부모님과 연동하기</h1>
+      <p style="margin-top:4px">부모 계정과 연결하여 퀘스트를 받고 용돈을 모아보세요!</p>
     </div>
 
     <div class="card">
-      <h3>방법 1. 부모님 초대 코드로 연동</h3>
-      <p class="text-muted">부모님 화면의 자녀목록 탭에 있는 <b>6자리 초대코드</b>를 입력하세요.</p>
-      <input id="f-link-code" maxlength="6" placeholder="예: A1B2C3" style="text-align:center; font-size:24px; letter-spacing:4px; text-transform:uppercase;">
-      <button class="btn-mint" style="width:100%; margin-bottom:14px;" onclick="linkParentByCode()">초대 코드로 연결</button>
-
-      <hr style="border:0; border-top:1px dashed var(--border-color); margin:16px 0;">
-
-      <h3>방법 2. 부모님 이메일/연락처로 연동</h3>
-      <p class="text-muted">부모님의 가입 이메일 주소 또는 전화번호를 입력하세요.</p>
-      <input id="f-link-contact" placeholder="부모님 이메일 또는 010-0000-0000">
-      <button class="btn-yellow" style="width:100%;" onclick="linkParentByContact()">이메일/연락처로 검색 연동</button>
-
-      <div class="err-msg">${esc(State.err)}</div>
+      <h3>방법 1. 부모님의 6자리 초대코드 입력</h3>
+      <input id="f-link-code" placeholder="예: ABC123" style="text-align:center;font-size:24px;letter-spacing:4px;text-transform:uppercase">
+      <button class="btn-mint" style="width:100%" onclick="linkParentByCode()">코드 연동하기</button>
     </div>
 
-    <div style="text-align:center;">
-      <button class="link-btn" onclick="logout()">다른 계정으로 로그인 (로그아웃)</button>
+    <div class="card">
+      <h3>방법 2. 부모님의 이메일 또는 연락처 입력</h3>
+      <input id="f-link-contact" placeholder="부모님 이메일 또는 휴대폰 번호">
+      <button class="btn-yellow" style="width:100%" onclick="linkParentByContact()">연락처 검색 연동</button>
+    </div>
+
+    <div class="err-msg">${esc(State.err)}</div>
+    <div style="text-align:center">
+      <button class="link-btn" onclick="logout()">로그아웃</button>
     </div>
   `;
 }
 
-// 4. Parent View Content
-function renderParentView() {
+function getParentView() {
   const pendingReports = State.reports.filter(r => r.status === "pending");
   const unreadNotifs = State.notifications.filter(n => !n.read);
-  const getChildName = id => State.kids.find(k => k.id === id)?.name || "전체 자녀";
 
-  let body = `
-    <div class="card card-hero row" style="text-align:left;">
-      <div>
-        <h2 style="font-size:24px;">👨‍👩‍👧 ${esc(State.me.name)}님의 본부</h2>
-        <div style="font-size:13px; opacity:0.9;">연락처: ${esc(State.me.phone || '미등록')} | ${esc(State.me.email)}</div>
-      </div>
-      <button class="btn-ghost fit" style="padding:6px 10px; font-size:13px;" onclick="openEditProfileModal()">⚙️ 프로필</button>
+  let html = `
+    <div class="card card-hero">
+      <h2>👨‍👩‍👧 ${esc(State.me.name)}님의 보상 본부</h2>
+      <p style="margin-top:4px;font-size:13px">${State.me.email ? esc(State.me.email) : ''} ${State.me.phone ? '· ' + esc(State.me.phone) : ''}</p>
     </div>
   `;
 
-  // TAB: Pending Approvals
-  if (State.tab === "home") {
-    body += `
-      ${unreadNotifs.length > 0 ? `
-        <div class="card" style="background:#FFF9E6; border-color:#F39C12;">
-          <h3 style="color:#D35400;">🔔 도착한 알림 (${unreadNotifs.length})</h3>
-          ${unreadNotifs.map(n => `
-            <div style="padding:8px 0; border-bottom:1px dashed #F39C12;" class="row">
-              <div style="flex:1;">
-                <b>${esc(n.title)}</b>
-                <div style="font-size:13px; margin-top:2px;">${esc(n.message)}</div>
-                <div class="text-muted" style="font-size:11px;">${new Date(n.ts).toLocaleTimeString()}</div>
-              </div>
-              <button class="btn-ghost fit" style="font-size:12px; padding:4px 8px;" onclick="markNotificationRead('${n.id}')">확인 완료</button>
-            </div>
-          `).join("")}
+  // 실시간 알림 카드 렌더링
+  if (unreadNotifs.length > 0) {
+    html += `<div style="margin-bottom:12px">
+      <div style="font-family:'Jua',sans-serif;font-size:16px;margin-bottom:6px">🔔 도착한 알림 (${unreadNotifs.length})</div>
+      ${unreadNotifs.map(n => `
+        <div class="card" style="border-color:var(--coral-pink);background:#FFF9FA;padding:12px">
+          <div style="font-weight:bold;font-size:15px">${esc(n.title)}</div>
+          <div style="font-size:13px;margin:4px 0">${esc(n.message)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+            <span class="text-muted" style="font-size:11px">${new Date(n.ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+            <button class="btn-ghost fit" style="padding:4px 10px;font-size:12px" onclick="markNotificationRead('${n.id}')">확인 완료</button>
+          </div>
         </div>
-      ` : ''}
+      `).join('')}
+    </div>`;
+  }
 
-      <h3 style="margin:12px 4px;">✅ 승인 대기 중인 보고 (${pendingReports.length})</h3>
-    `;
-    if (pendingReports.length === 0) {
-      body += `<div class="card empty-state">승인을 기다리는 퀘스트가 없습니다! 😊<br>자녀가 완료한 할일을 보고하면 여기에 표시됩니다.</div>`;
-    } else {
-      body += pendingReports.map(r => `
+  if (State.tab === "home") {
+    html += `
+      <h3 style="margin:10px 0 6px">📥 자녀 퀘스트 완료 보고</h3>
+      ${pendingReports.length > 0 ? pendingReports.map(r => `
         <div class="card">
           <div class="quest-item">
             <div class="quest-icon">${esc(r.icon)}</div>
-            <div style="flex:1;">
+            <div style="flex:1">
               <div class="quest-title">${esc(r.title)}</div>
-              <div class="text-muted">요청 자녀: <b>${esc(r.childName)}</b> · ${new Date(r.ts).toLocaleDateString()}</div>
-              ${r.memo ? `<div style="background:#f0f4f8; padding:6px 10px; border-radius:8px; margin-top:4px; font-size:13px;">💬 "${esc(r.memo)}"</div>` : ''}
-              <div class="amount-won" style="margin-top:2px;">+${won(r.reward)}</div>
+              <div class="text-muted">${esc(r.childName)} · ${new Date(r.ts).toLocaleDateString()} ${r.memo ? `· "${esc(r.memo)}"` : ''}</div>
+              <div class="amount-won">+${won(r.reward)}</div>
             </div>
           </div>
-          <div class="row" style="margin-top:12px;">
-            <button class="btn-pink" onclick="reviewReport('${r.id}', 'rejected')">반려하기</button>
-            <button class="btn-mint" onclick="reviewReport('${r.id}', 'approved')">승인하고 용돈 쌓기 ✔</button>
+          <div class="row" style="margin-top:12px">
+            <button class="btn-pink" onclick="reviewReport('${r.id}','rejected')">다시 해보자 💬</button>
+            <button class="btn-mint" onclick="reviewReport('${r.id}','approved')">승인 완료 ✔</button>
           </div>
         </div>
-      `).join("");
-    }
+      `).join('') : `<div class="card empty-state">승인을 기다리는 보고가 없습니다 😊<br>자녀가 퀘스트를 완료하면 여기에 나타납니다.</div>`}
+    `;
   }
 
-  // TAB: Quest Management
   if (State.tab === "quests") {
-    body += `
+    html += `
       <div class="card">
         <h3>✨ 새 퀘스트 만들기</h3>
         <div class="row">
-          <select id="q-icon" class="fit" style="width:75px;">${ICONS.map(i => `<option value="${i}">${i}</option>`).join("")}</select>
-          <input id="q-title" placeholder="퀘스트 제목 (예: 방 청소하기)">
+          <select id="q-icon" class="fit" style="width:75px">${ICONS.map(i => `<option>${i}</option>`).join('')}</select>
+          <input id="q-title" placeholder="할일 (예: 방 정리하기, 책 1권 읽기)">
         </div>
         <div class="row">
           <input id="q-reward" type="number" step="100" placeholder="보상 금액 (원)">
@@ -1085,342 +1069,212 @@ function renderParentView() {
           </select>
         </div>
         <div class="row">
-          <input id="q-duetime" placeholder="수행/마감시간 (예: 18:00까지, 08:00~09:00)">
+          <input id="q-duetime" placeholder="수행/마감 시간 (예: 18:00까지, 저녁 식사 전)">
+          <select id="q-child">
+            <option value="all">모든 자녀 대상</option>
+            ${State.kids.map(k => `<option value="${k.id}">${esc(k.name)} 전용</option>`).join('')}
+          </select>
         </div>
-        <label style="font-size:13px; font-weight:bold;">대상 자녀 선택</label>
-        <select id="q-child">
-          <option value="all">모든 자녀</option>
-          ${State.kids.map(k => `<option value="${k.id}">${esc(k.name)}만</option>`).join("")}
-        </select>
-        <button class="btn-mint" style="width:100%; margin-top:4px;" onclick="addQuest()">퀘스트 등록 및 알림 보내기</button>
+        <button class="btn-mint" style="width:100%;margin-top:4px" onclick="addQuest()">퀘스트 등록 및 알림 발송</button>
       </div>
 
-      <h3 style="margin:16px 4px 8px;">📋 등록된 퀘스트 목록 (${State.quests.length})</h3>
-    `;
-
-    if (State.quests.length === 0) {
-      body += `<div class="card empty-state">등록된 퀘스트가 없습니다. 자녀를 위한 첫 퀘스트를 만들어 보세요!</div>`;
-    } else {
-      body += State.quests.map(q => `
+      <h3 style="margin:16px 0 6px">📋 등록된 퀘스트 목록</h3>
+      ${State.quests.length > 0 ? State.quests.map(q => `
         <div class="card quest-item">
           <div class="quest-icon">${esc(q.icon)}</div>
-          <div style="flex:1;">
+          <div style="flex:1">
             <div class="quest-title">${esc(q.title)}</div>
             <div class="text-muted">
-              ${q.repeat === 'once' ? '1회성' : '매일'} · 대상: ${esc(getChildName(q.childId))}
-              ${q.dueTime ? `<br><span style="color:#E67E22;">⏰ 시간: ${esc(q.dueTime)}</span>` : ''}
+              ${q.repeat === "once" ? "한 번만" : "매일"} · ${q.childId === "all" ? "모든 자녀" : State.kids.find(k => k.id === q.childId)?.name || '자녀 전용'}
+              ${q.dueTime ? ` · ⏰ ${esc(q.dueTime)}` : ''}
             </div>
             <div class="amount-won">${won(q.reward)}</div>
           </div>
           <button class="btn-ghost fit" onclick="deleteQuest('${q.id}')">🗑️</button>
         </div>
-      `).join("");
-    }
+      `).join('') : `<div class="empty-state">등록된 퀘스트가 없습니다.</div>`}
+    `;
   }
 
-  // TAB: Kids & Linking Management
   if (State.tab === "kids") {
-    body += `
+    html += `
       <div class="card">
-        <h3>🔗 자녀 연동 초대 코드</h3>
-        <p class="text-muted" style="margin-top:-4px;">자녀가 로그인 후 아래 코드를 입력하면 자동 연동됩니다.</p>
-        <div class="invite-code-box">${esc(State.me.code || 'CODE')}</div>
+        <h3>🔑 우리 집 연결 초대코드</h3>
+        <div class="text-muted">자녀 계정에서 아래 6자리 코드를 입력하면 즉시 연결됩니다.</div>
+        <div class="invite-code-box">${esc(State.me.code)}</div>
       </div>
 
-      <h3 style="margin:16px 4px 8px;">🧒 연동된 자녀 목록 (${State.kids.length})</h3>
-    `;
+      <h3 style="margin:16px 0 6px">🧒 연동된 자녀 목록 (${State.kids.length}명)</h3>
+      ${State.kids.length > 0 ? State.kids.map(k => {
+        const lvl = getLevelInfo(k.id);
+        const earnedVal = getEarned(k.id);
+        const paidVal = getPaid(k.id);
+        const balVal = getBalance(k.id);
 
-    if (State.kids.length === 0) {
-      body += `<div class="card empty-state">아직 연동된 자녀가 없습니다.</div>`;
-    } else {
-      body += State.kids.map(k => {
-        const lv = getLevelInfo(k.id);
-        const earned = getEarned(k.id);
-        const paid = getPaid(k.id);
-        const bal = getBalance(k.id);
         return `
           <div class="card">
             <div class="row">
-              <div>
-                <h3 style="font-size:20px;">🧒 ${esc(k.name)}</h3>
-                <div class="text-muted" style="font-size:12px;">${esc(k.email || k.phone || '계정 정보 없음')}</div>
-                <div style="font-size:12px; margin-top:4px;" class="text-muted">
-                  ${lv.title} (Lv.${lv.lv}) · 총 획득: ${won(earned)} | 지급됨: ${won(paid)}
-                </div>
-              </div>
-              <div style="text-align:right;">
-                <div style="font-size:12px; color:var(--text-muted);">남은 미지급 잔액</div>
-                <div class="amount-won" style="font-size:22px;">${won(bal)}</div>
-              </div>
+              <h3>🧒 ${esc(k.name)}</h3>
+              <div class="amount-won" style="text-align:right;font-size:20px">잔액: ${won(balVal)}</div>
             </div>
-
-            <div class="row" style="margin-top:12px;">
-              <button class="btn-yellow fit" style="font-size:13px;" onclick="sendDirectNotification('${k.id}')">📲 콕! 찌르기</button>
-              <button class="btn-mint" onclick="recordPayout('${k.id}')">💵 용돈 지급 기록하기</button>
+            <div class="text-muted" style="margin:4px 0">
+              ${lvl.title} (Lv.${lvl.lv}) · 총 획득: ${won(earnedVal)} · 지급 완료: ${won(paidVal)}
+            </div>
+            <div class="row" style="margin-top:10px">
+              <button class="btn-yellow fit" onclick="sendDirectNotification('${k.id}')">📲 콕! 찌르기 알림 보내기</button>
+              <button class="btn-mint fit" onclick="recordPayout('${k.id}')">용돈 지급 기록</button>
+              <button class="btn-ghost fit" onclick="unlinkChild('${k.id}')">해제</button>
             </div>
           </div>
         `;
-      }).join("");
-    }
-  }
-
-  // TAB: Stats & Activity History
-  if (State.tab === "stats") {
-    body += `<h3 style="margin:12px 4px;">📊 전체 활동 및 용돈 지급 내역</h3>`;
-    const approvedReports = State.reports.filter(r => r.status === "approved");
-    
-    body += `
-      <div class="card">
-        <h3>💰 용돈 지급 내역 (${State.payouts.length}건)</h3>
-        ${State.payouts.length === 0 ? '<p class="text-muted">지급 완료 내역이 아직 없습니다.</p>' : 
-          State.payouts.map(p => `
-            <div class="row" style="padding:8px 0; border-bottom:1px solid #eee;">
-              <div>
-                <div><b>${esc(getChildName(p.childId))}</b> 용돈 지급</div>
-                <div class="text-muted" style="font-size:11px;">${new Date(p.ts).toLocaleString()}</div>
-              </div>
-              <div class="amount-won fit" style="color:#27AE60;">-${won(p.amount)}</div>
-            </div>
-          `).join("")
-        }
-      </div>
-
-      <div class="card">
-        <h3>📜 승인 완료된 퀘스트 내역 (${approvedReports.length}건)</h3>
-        ${approvedReports.length === 0 ? '<p class="text-muted">승인된 내역이 없습니다.</p>' : 
-          approvedReports.map(r => `
-            <div class="row" style="padding:8px 0; border-bottom:1px solid #eee;">
-              <div>
-                <div>${esc(r.icon)} <b>${esc(r.title)}</b> (${esc(r.childName)})</div>
-                <div class="text-muted" style="font-size:11px;">${new Date(r.ts).toLocaleString()}</div>
-              </div>
-              <div class="amount-won fit">+${won(r.reward)}</div>
-            </div>
-          `).join("")
-        }
-      </div>
+      }).join('') : `<div class="card empty-state">연동된 자녀가 없습니다.<br>상단의 초대코드로 자녀를 연결해 보세요!</div>`}
     `;
   }
 
-  const nav = `
+  const tabsNav = `
     <nav class="tabs">
-      <button class="${State.tab === 'home' ? 'on' : ''}" onclick="setTab('home')">
-        <span class="icon">✅</span>승인 대기 ${pendingReports.length ? `<span class="badge">${pendingReports.length}</span>` : ''}
+      <button class="${State.tab === "home" ? "on" : ""}" onclick="State.tab='home';render();">
+        <span class="icon">✅</span>
+        <span>승인 요청 ${pendingReports.length > 0 ? `<span class="badge">${pendingReports.length}</span>` : ''}</span>
       </button>
-      <button class="${State.tab === 'quests' ? 'on' : ''}" onclick="setTab('quests')">
-        <span class="icon">📋</span>퀘스트 관리
+      <button class="${State.tab === "quests" ? "on" : ""}" onclick="State.tab='quests';render();">
+        <span class="icon">📋</span>
+        <span>퀘스트 관리</span>
       </button>
-      <button class="${State.tab === 'kids' ? 'on' : ''}" onclick="setTab('kids')">
-        <span class="icon">🧒</span>자녀 목록
-      </button>
-      <button class="${State.tab === 'stats' ? 'on' : ''}" onclick="setTab('stats')">
-        <span class="icon">📊</span>리포트
+      <button class="${State.tab === "kids" ? "on" : ""}" onclick="State.tab='kids';render();">
+        <span class="icon">🧒</span>
+        <span>우리 아이</span>
       </button>
     </nav>
   `;
 
-  return body + nav + `<div style="text-align:center; margin-top:20px;"><button class="link-btn" onclick="logout()">로그아웃</button></div>`;
+  return html + tabsNav + `<div style="text-align:center;margin-top:12px"><button class="link-btn" onclick="logout()">로그아웃</button></div>`;
 }
 
-// 5. Child View Content
-function renderChildView() {
-  const myId = State.me.uid;
-  const lv = getLevelInfo(myId);
-  const myBalance = getBalance(myId);
+function getChildView() {
+  const lvl = getLevelInfo(State.me.uid);
+  const currentBal = getBalance(State.me.uid);
+  const availableQuests = State.quests.filter(isQuestAvailable);
+  const unreadNotifs = State.notifications.filter(n => !n.read);
 
-  // Filter available quests
-  const availableQuests = State.quests.filter(q => {
-    if (q.childId !== "all" && q.childId !== myId) return false;
-    const myReports = State.reports.filter(r => r.questId === q.id && r.status !== "rejected");
-    if (q.repeat === "once") return myReports.length === 0;
-    // Daily repeat
-    return !myReports.some(r => new Date(r.ts).toDateString() === todayStr());
-  });
-
-  let body = `
+  let html = `
     <div class="card card-hero">
       <div class="row">
-        <div style="text-align:left;">
+        <div style="text-align:left">
           <h2>🧒 ${esc(State.me.name)}</h2>
-          <div style="font-size:14px; font-weight:bold; color:var(--primary-ink);">${lv.title} (Lv.${lv.lv})</div>
+          <div style="font-size:14px;color:var(--primary-ink);font-weight:bold">${lvl.title} (Lv.${lvl.lv})</div>
         </div>
-        <div style="text-align:right;">
-          <div style="font-size:13px; color:var(--primary-ink); font-weight:500;">보유 중인 용돈</div>
-          <div class="amount-won" style="font-size:26px; color:var(--primary-ink);">💰 ${won(myBalance)}</div>
+        <div class="amount-won" style="text-align:right;font-size:24px;color:var(--primary-ink)">
+          💰 ${won(currentBal)}
         </div>
       </div>
-      <div class="progress-bar" style="margin-top:12px;" title="다음 레벨까지">
-        <i style="width:${lv.progress}%"></i>
+      <div class="progress-bar" style="margin-top:10px" title="다음 레벨까지">
+        <i style="width:${lvl.progress}%"></i>
       </div>
-      <div style="font-size:12px; margin-top:4px; text-align:right; font-weight:500;">성공한 퀘스트: ${lv.count}개</div>
     </div>
   `;
 
-  // TAB: Perform Quests (Child View)
-  if (State.tab === "home") {
-    const unreadNotifs = State.notifications.filter(n => !n.read);
-
-    body += `
-      ${unreadNotifs.length > 0 ? `
-        <div class="card" style="background:#FFF9E6; border-color:#F39C12;">
-          <h3 style="color:#D35400;">🔔 부모님으로부터 온 알림 (${unreadNotifs.length})</h3>
-          ${unreadNotifs.map(n => `
-            <div style="padding:8px 0; border-bottom:1px dashed #F39C12;" class="row">
-              <div style="flex:1;">
-                <b>${esc(n.title)}</b>
-                <div style="font-size:13px; margin-top:2px;">${esc(n.message)}</div>
-                <div class="text-muted" style="font-size:11px;">${new Date(n.ts).toLocaleTimeString()}</div>
-              </div>
-              <button class="btn-ghost fit" style="font-size:12px; padding:4px 8px;" onclick="markNotificationRead('${n.id}')">확인 완료</button>
-            </div>
-          `).join("")}
+  // 수신 알림 표시
+  if (unreadNotifs.length > 0) {
+    html += `<div style="margin-bottom:12px">
+      <div style="font-family:'Jua',sans-serif;font-size:16px;margin-bottom:6px">🔔 부모님 메시지 & 알림 (${unreadNotifs.length})</div>
+      ${unreadNotifs.map(n => `
+        <div class="card" style="border-color:var(--sky-blue);background:var(--sky-light);padding:12px">
+          <div style="font-weight:bold;font-size:15px">${esc(n.title)}</div>
+          <div style="font-size:13px;margin:4px 0">${esc(n.message)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+            <span class="text-muted" style="font-size:11px">${new Date(n.ts).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+            <button class="btn-ghost fit" style="padding:4px 10px;font-size:12px" onclick="markNotificationRead('${n.id}')">확인 완료</button>
+          </div>
         </div>
-      ` : ''}
+      `).join('')}
+    </div>`;
+  }
 
-      <h3 style="margin:12px 4px;">⚔️ 오늘 수행 가능한 퀘스트 (${availableQuests.length})</h3>
-    `;
-
-    if (availableQuests.length === 0) {
-      body += `<div class="card empty-state">🎉 오늘 할 수 있는 퀘스트를 모두 마쳤거나 등록된 퀘스트가 없습니다!</div>`;
-    } else {
-      body += availableQuests.map(q => `
+  if (State.tab === "home") {
+    html += `
+      <h3 style="margin:10px 0 6px">⚔️ 오늘 할 수 있는 퀘스트</h3>
+      ${availableQuests.length > 0 ? availableQuests.map(q => `
         <div class="card quest-item">
           <div class="quest-icon">${esc(q.icon)}</div>
-          <div style="flex:1;">
+          <div style="flex:1">
             <div class="quest-title">${esc(q.title)}</div>
-            ${q.dueTime ? `<div style="font-size:12px; font-weight:bold; color:#E67E22; margin-top:2px;">⏰ 마감/수행 시간: ${esc(q.dueTime)}</div>` : ''}
+            ${q.dueTime ? `<div class="text-muted" style="color:#E67E22;font-weight:bold">⏰ ${esc(q.dueTime)}</div>` : ''}
             <div class="amount-won">+${won(q.reward)}</div>
           </div>
-          <button class="btn-mint fit" onclick="submitQuestReport('${q.id}')">했어요! 🖐️</button>
+          <button class="btn-mint fit" onclick="submitQuestReport('${q.id}')">했어요!</button>
         </div>
-      `).join("");
-    }
-  }
-
-  // TAB: Activity Log
-  if (State.tab === "log") {
-    body += `<h3 style="margin:12px 4px;">📜 내 퀘스트 제출 기록</h3>`;
-    if (State.reports.length === 0) {
-      body += `<div class="card empty-state">아직 제출한 퀘스트가 없습니다.</div>`;
-    } else {
-      body += State.reports.map(r => {
-        const pillClass = r.status === 'pending' ? 'pill-pending' : r.status === 'approved' ? 'pill-approved' : 'pill-rejected';
-        const pillLabel = r.status === 'pending' ? '검토중 ⏳' : r.status === 'approved' ? '승인됨 ✨' : '반려됨 😅';
-        return `
-          <div class="card quest-item">
-            <div class="quest-icon">${esc(r.icon)}</div>
-            <div style="flex:1;">
-              <div class="quest-title">${esc(r.title)}</div>
-              <div class="text-muted">${new Date(r.ts).toLocaleDateString()} · +${won(r.reward)}</div>
-            </div>
-            <span class="pill ${pillClass}">${pillLabel}</span>
-          </div>
-        `;
-      }).join("");
-    }
-
-    if (State.payouts.length > 0) {
-      body += `<h3 style="margin:16px 4px 8px;">💵 부모님께 받은 용돈 기록</h3>`;
-      body += State.payouts.map(p => `
-        <div class="card row">
-          <div>
-            <div><b>용돈 받음! 🎉</b></div>
-            <div class="text-muted" style="font-size:12px;">${new Date(p.ts).toLocaleDateString()}</div>
-          </div>
-          <div class="amount-won fit" style="font-size:20px; color:#27AE60;">+${won(p.amount)}</div>
-        </div>
-      `).join("");
-    }
-  }
-
-  // TAB: Parent Connection Info & Profile
-  if (State.tab === "parent_info") {
-    body += `
-      <div class="card">
-        <h3>👨‍👩‍👧 연동된 부모님 정보</h3>
-        <div style="margin:12px 0; line-height:1.6;">
-          <div><b>성함:</b> ${esc(State.me.parentName || '부모님')}</div>
-          <div><b>이메일:</b> ${esc(State.me.parentEmail || '정보 없음')}</div>
-          <div><b>연락처:</b> ${esc(State.me.parentPhone || '정보 없음')}</div>
-        </div>
-        <button class="btn-pink" style="width:100%; font-size:14px;" onclick="unlinkParent()">부모님 연동 해제하기</button>
-      </div>
-
-      <div class="card">
-        <h3>👤 내 프로필 정보</h3>
-        <div style="margin:12px 0; line-height:1.6;">
-          <div><b>이름:</b> ${esc(State.me.name)}</div>
-          <div><b>이메일/아이디:</b> ${esc(State.me.email)}</div>
-          <div><b>내 연락처:</b> ${esc(State.me.phone || '미등록')}</div>
-        </div>
-        <button class="btn-ghost" style="width:100%; font-size:14px;" onclick="openEditProfileModal()">프로필 수정</button>
-      </div>
+      `).join('') : `<div class="card empty-state">${State.quests.length > 0 ? "오늘 할 수 있는 퀘스트를 모두 완료했습니다! 🎉" : "부모님이 퀘스트를 등록하면 여기에 표시됩니다."}</div>`}
     `;
   }
 
-  const nav = `
+  if (State.tab === "log") {
+    html += `
+      <h3 style="margin:10px 0 6px">📜 완료 및 보고 기록</h3>
+      ${State.reports.length > 0 ? State.reports.map(r => `
+        <div class="card quest-item">
+          <div class="quest-icon">${esc(r.icon)}</div>
+          <div style="flex:1">
+            <div class="quest-title">${esc(r.title)}</div>
+            <div class="text-muted">${new Date(r.ts).toLocaleDateString()} · +${won(r.reward)}</div>
+          </div>
+          <div>
+            ${r.status === "pending" ? '<span class="pill pill-pending">대기중</span>' 
+             : r.status === "approved" ? '<span class="pill pill-approved">승인</span>' 
+             : '<span class="pill pill-rejected">반려</span>'}
+          </div>
+        </div>
+      `).join('') : `<div class="card empty-state">아직 보고한 퀘스트가 없습니다.</div>`}
+
+      ${State.payouts.length > 0 ? `
+        <h3 style="margin:16px 0 6px">💵 용돈 지급받은 내역</h3>
+        ${State.payouts.map(p => `
+          <div class="card row">
+            <span>${new Date(p.ts).toLocaleDateString()}</span>
+            <span class="amount-won" style="text-align:right">${won(p.amount)} 지급됨</span>
+          </div>
+        `).join('')}
+      ` : ''}
+    `;
+  }
+
+  const tabsNav = `
     <nav class="tabs">
-      <button class="${State.tab === 'home' ? 'on' : ''}" onclick="setTab('home')">
-        <span class="icon">⚔️</span>퀘스트
+      <button class="${State.tab === "home" ? "on" : ""}" onclick="State.tab='home';render();">
+        <span class="icon">⚔️</span>
+        <span>오늘의 퀘스트 ${availableQuests.length > 0 ? `<span class="badge">${availableQuests.length}</span>` : ''}</span>
       </button>
-      <button class="${State.tab === 'log' ? 'on' : ''}" onclick="setTab('log')">
-        <span class="icon">📜</span>활동기록
-      </button>
-      <button class="${State.tab === 'parent_info' ? 'on' : ''}" onclick="setTab('parent_info')">
-        <span class="icon">👨‍👩‍👧</span>부모연동
+      <button class="${State.tab === "log" ? "on" : ""}" onclick="State.tab='log';render();">
+        <span class="icon">📜</span>
+        <span>내 기록</span>
       </button>
     </nav>
   `;
 
-  return body + nav + `<div style="text-align:center; margin-top:20px;"><button class="link-btn" onclick="logout()">로그아웃</button></div>`;
+  return html + tabsNav + `
+    <div style="text-align:center;margin-top:12px">
+      <button class="link-btn" onclick="unlinkParent()">부모님 연동 해제</button> | 
+      <button class="link-btn" onclick="logout()">로그아웃</button>
+    </div>
+  `;
 }
 
-// 6. Modal Renderer
-function renderModal() {
-  if (!State.modal) return "";
-
-  if (State.modal === "edit_profile") {
-    return `
-      <div class="modal-overlay" onclick="if(event.target===this)closeModal()">
-        <div class="modal-content">
-          <h3 style="margin-bottom:12px;">⚙️ 프로필 정보 수정</h3>
-          <label style="font-size:13px; font-weight:bold;">이름 / 닉네임</label>
-          <input id="mod-name" value="${esc(State.me.name || '')}" placeholder="이름을 입력하세요">
-          
-          <label style="font-size:13px; font-weight:bold;">연락처 (선택)</label>
-          <input id="mod-phone" type="tel" value="${esc(State.me.phone || '')}" placeholder="010-0000-0000">
-
-          <div class="row" style="margin-top:14px;">
-            <button class="btn-ghost" onclick="closeModal()">취소</button>
-            <button class="btn-mint" onclick="updateProfile()">저장하기</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-  return "";
-}
-
-// Main Render Dispatcher
+// Main View Router
 function render() {
-  const app = $("#app");
-  if (!app) return;
+  const container = $("#app");
+  if (!container) return;
 
-  let content = "";
-  if (State.authMode === "setup_profile") {
-    content = renderProfileSetupView();
-  } else if (!State.me) {
-    content = renderAuthView();
+  if (!State.me) {
+    container.innerHTML = getAuthView();
   } else if (State.me.role === "parent") {
-    content = renderParentView();
+    container.innerHTML = getParentView();
   } else {
-    content = State.me.parentId ? renderChildView() : renderChildConnectView();
+    container.innerHTML = State.me.parentId ? getChildView() : getLinkConnectView();
   }
-
-  app.innerHTML = content + renderModal();
 }
 
-// Initial Call
+// Global Export Execution
+window.render = render;
 render();
 </script>
 </body>
