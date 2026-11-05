@@ -462,7 +462,7 @@ function subscribeData() {
     }));
   }
 
-  // 내 수신 알림 실시간 구독
+  // 내 수신 알림 실시간 구독 (부모/자녀 공통)
   unsubs.push(onSnapshot(query(collection(db, "notifications"), where("targetId", "==", uid)), sn => {
     State.notifications = sn.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => (b.ts||0) - (a.ts||0));
     render();
@@ -796,14 +796,42 @@ window.submitQuestReport = async (questId) => {
     ts: Date.now()
   });
 
-  toast("부모님께 퀘스트 완료 보고서를 보냈어요! ⏳");
+  // 부모님에게 완료 보고 알림 전송
+  await addDoc(collection(db, "notifications"), {
+    targetId: State.me.parentId,
+    senderName: State.me.name,
+    type: "report_submitted",
+    title: `🖐️ ${State.me.name} 자녀의 퀘스트 완료 보고!`,
+    message: `"${quest.title}" 퀘스트를 수행했어요. 승인을 확인해 주세요.${memo.trim() ? ` (메시지: ${memo.trim()})` : ''}`,
+    ts: Date.now(),
+    read: false
+  });
+
+  toast("부모님께 퀘스트 완료 보고서와 알림을 보냈어요! ⏳");
 };
 
 window.reviewReport = async (reportId, status) => {
+  const report = State.reports.find(r => r.id === reportId);
+
   await updateDoc(doc(db, "reports", reportId), {
     status,
     reviewedAt: Date.now()
   });
+
+  if (report) {
+    // 자녀에게 승인/반려 처리 알림 전송
+    await addDoc(collection(db, "notifications"), {
+      targetId: report.childId,
+      senderName: State.me.name,
+      type: "report_reviewed",
+      title: status === "approved" ? "🎉 퀘스트 승인 완료!" : "😅 퀘스트 검토 결과",
+      message: status === "approved" 
+        ? `"${report.title}" 퀘스트가 승인되어 ${won(report.reward)}의 보상이 쌓였어요!` 
+        : `"${report.title}" 퀘스트가 반려되었어요. 다시 확인해 보세요.`,
+      ts: Date.now(),
+      read: false
+    });
+  }
 
   if (status === "approved") {
     triggerConfetti();
@@ -983,6 +1011,7 @@ function renderChildConnectView() {
 // 4. Parent View Content
 function renderParentView() {
   const pendingReports = State.reports.filter(r => r.status === "pending");
+  const unreadNotifs = State.notifications.filter(n => !n.read);
   const getChildName = id => State.kids.find(k => k.id === id)?.name || "전체 자녀";
 
   let body = `
@@ -997,7 +1026,25 @@ function renderParentView() {
 
   // TAB: Pending Approvals
   if (State.tab === "home") {
-    body += `<h3 style="margin:12px 4px;">✅ 승인 대기 중인 보고 (${pendingReports.length})</h3>`;
+    body += `
+      ${unreadNotifs.length > 0 ? `
+        <div class="card" style="background:#FFF9E6; border-color:#F39C12;">
+          <h3 style="color:#D35400;">🔔 도착한 알림 (${unreadNotifs.length})</h3>
+          ${unreadNotifs.map(n => `
+            <div style="padding:8px 0; border-bottom:1px dashed #F39C12;" class="row">
+              <div style="flex:1;">
+                <b>${esc(n.title)}</b>
+                <div style="font-size:13px; margin-top:2px;">${esc(n.message)}</div>
+                <div class="text-muted" style="font-size:11px;">${new Date(n.ts).toLocaleTimeString()}</div>
+              </div>
+              <button class="btn-ghost fit" style="font-size:12px; padding:4px 8px;" onclick="markNotificationRead('${n.id}')">확인 완료</button>
+            </div>
+          `).join("")}
+        </div>
+      ` : ''}
+
+      <h3 style="margin:12px 4px;">✅ 승인 대기 중인 보고 (${pendingReports.length})</h3>
+    `;
     if (pendingReports.length === 0) {
       body += `<div class="card empty-state">승인을 기다리는 퀘스트가 없습니다! 😊<br>자녀가 완료한 할일을 보고하면 여기에 표시됩니다.</div>`;
     } else {
