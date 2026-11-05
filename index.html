@@ -509,8 +509,8 @@ onAuthStateChanged(auth, user => {
 });
 
 // Gamification Calculations
-const getEarned = childId => State.reports.filter(r => r.childId === childId && r.status === "approved").reduce((sum, r) => sum + (r.reward || 0), 0);
-const getPaid = childId => State.payouts.filter(p => p.childId === childId).reduce((sum, p) => sum + (p.amount || 0), 0);
+const getEarned = childId => State.reports.filter(r => r.childId === childId && r.status === "approved").reduce((sum, r) => sum + (Number(r.reward) || 0), 0);
+const getPaid = childId => State.payouts.filter(p => p.childId === childId).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 const getBalance = childId => getEarned(childId) - getPaid(childId);
 const getApprovedCount = childId => State.reports.filter(r => r.childId === childId && r.status === "approved").length;
 const getLevelInfo = childId => {
@@ -1135,22 +1135,28 @@ function renderParentView() {
     } else {
       body += State.kids.map(k => {
         const lv = getLevelInfo(k.id);
+        const earned = getEarned(k.id);
+        const paid = getPaid(k.id);
         const bal = getBalance(k.id);
         return `
           <div class="card">
             <div class="row">
               <div>
                 <h3 style="font-size:20px;">🧒 ${esc(k.name)}</h3>
-                <div class="text-muted">${esc(k.email || k.phone || '계정 정보 없음')}</div>
+                <div class="text-muted" style="font-size:12px;">${esc(k.email || k.phone || '계정 정보 없음')}</div>
+                <div style="font-size:12px; margin-top:4px;" class="text-muted">
+                  ${lv.title} (Lv.${lv.lv}) · 총 획득: ${won(earned)} | 지급됨: ${won(paid)}
+                </div>
               </div>
               <div style="text-align:right;">
+                <div style="font-size:12px; color:var(--text-muted);">남은 미지급 잔액</div>
                 <div class="amount-won" style="font-size:22px;">${won(bal)}</div>
               </div>
             </div>
 
-            <div class="row" style="margin-top:10px;">
-              <button class="btn-yellow fit" style="font-size:13px;" onclick="sendDirectNotification('${k.id}')">📲 콕! 찌르기 알림 보내기</button>
-              <button class="btn-mint" onclick="recordPayout('${k.id}')">💵 용돈 지급</button>
+            <div class="row" style="margin-top:12px;">
+              <button class="btn-yellow fit" style="font-size:13px;" onclick="sendDirectNotification('${k.id}')">📲 콕! 찌르기</button>
+              <button class="btn-mint" onclick="recordPayout('${k.id}')">💵 용돈 지급 기록하기</button>
             </div>
           </div>
         `;
