@@ -114,14 +114,14 @@ function sub(q,k){
 
 onAuthStateChanged(auth,u=>{if(u)boot(u);else{clearData();State.me=null;render()}});
 
-// --- 계산 로직 (숫자 변환 및 엄격 집계) ---
+// --- 명확한 용돈 수식 연산 (숫자 타입 정제 적용) ---
 const getEarned=id=>State.reports.filter(r=>r.childId===id&&r.status==="approved").reduce((a,r)=>a+(Number(r.reward)||0),0);
 const getPaid=id=>State.payouts.filter(p=>p.childId===id).reduce((a,p)=>a+(Number(p.amount)||0),0);
 const getBal=id=>getEarned(id)-getPaid(id);
 const getCnt=id=>State.reports.filter(r=>r.childId===id&&r.status==="approved").length;
 const getLvl=id=>{const n=getCnt(id);return{lv:Math.floor(n/5)+1,pr:(n%5)/5*100,name:TITLES[Math.min(Math.floor(n/5),TITLES.length-1)]}};
 
-// --- 인증 및 프로필 액션 ---
+// --- 인증 처리 핸들러 ---
 window.setMode=m=>{State.mode=m;State.err="";render()};
 
 window.doAuth=async()=>{
@@ -185,7 +185,7 @@ window.connectParent=async()=>{
   await boot(auth.currentUser);
 };
 
-// --- 부모 기능 ---
+// --- 부모 전용 관리 함수 ---
 window.addQuest=async()=>{
   const title=$("#q-t").value.trim(),reward=parseInt($("#q-r").value,10);
   const dueTime=$("#q-due")?.value.trim()||"";
@@ -230,11 +230,11 @@ window.nudgeChild=async id=>{
   toast("자녀에게 알림을 보냈어요!");
 };
 
-// --- 자녀 기능 ---
+// --- 자녀 전용 수행 함수 ---
 window.submitReport=async id=>{
   const q=State.quests.find(x=>x.id===id);if(!q)return;
   const memo=prompt("부모님께 한마디 (비워도 돼요)","")??null;if(memo===null)return;
-  await addDoc(collection(db,"reports"),{parentId:State.me.parentId,childId:State.me.uid,childName:State.me.name,questId:id,title:q.title,icon:q.icon,reward:q.reward,memo,status:"pending",ts:Date.now()});
+  await addDoc(collection(db,"reports"),{parentId:State.me.parentId,childId:State.me.uid,childName:State.me.name,questId:id,title:q.title,icon:q.icon,reward:Number(q.reward),memo,status:"pending",ts:Date.now()});
   await addDoc(collection(db,"notifications"),{senderId:State.me.uid,targetId:State.me.parentId,title:"퀘스트 완료 보고! ⏳",body:`${State.me.name}님이 [${q.title}] 퀘스트를 완료했어요!`,read:false,ts:Date.now()});
   toast("보고했어요! 승인을 기다려요 ⏳");
 };
@@ -249,7 +249,7 @@ const isQuestAvailable=q=>{
 
 window.switchTab=k=>{State.tab=k;render()};
 
-// --- UI 렌더링 ---
+// --- 화면 렌더링 ---
 function renderNotifications(){
   if(!State.notifications.length)return"";
   return State.notifications.map(n=>`<div class="card" style="background:var(--sun);display:flex;align-items:center;justify-content:space-between"><div><div class="q-t">🔔 ${esc(n.title)}</div><div style="font-size:14px;margin-top:2px">${esc(n.body)}</div></div><button class="b-ghost fit" onclick="markNotificationRead('${n.id}')">확인</button></div>`).join("");
