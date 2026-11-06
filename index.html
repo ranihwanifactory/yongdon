@@ -114,14 +114,14 @@ function sub(q,k){
 
 onAuthStateChanged(auth,u=>{if(u)boot(u);else{clearData();State.me=null;render()}});
 
-// --- 명확한 용돈 수식 연산 (숫자 타입 정제 적용) ---
+// --- 용돈 통계 계산 로직 ---
 const getEarned=id=>State.reports.filter(r=>r.childId===id&&r.status==="approved").reduce((a,r)=>a+(Number(r.reward)||0),0);
 const getPaid=id=>State.payouts.filter(p=>p.childId===id).reduce((a,p)=>a+(Number(p.amount)||0),0);
 const getBal=id=>getEarned(id)-getPaid(id);
 const getCnt=id=>State.reports.filter(r=>r.childId===id&&r.status==="approved").length;
 const getLvl=id=>{const n=getCnt(id);return{lv:Math.floor(n/5)+1,pr:(n%5)/5*100,name:TITLES[Math.min(Math.floor(n/5),TITLES.length-1)]}};
 
-// --- 인증 처리 핸들러 ---
+// --- 인증 액션 ---
 window.setMode=m=>{State.mode=m;State.err="";render()};
 
 window.doAuth=async()=>{
@@ -185,7 +185,7 @@ window.connectParent=async()=>{
   await boot(auth.currentUser);
 };
 
-// --- 부모 전용 관리 함수 ---
+// --- 부모 기능 ---
 window.addQuest=async()=>{
   const title=$("#q-t").value.trim(),reward=parseInt($("#q-r").value,10);
   const dueTime=$("#q-due")?.value.trim()||"";
@@ -193,7 +193,6 @@ window.addQuest=async()=>{
   const childId=$("#q-c").value;
   await addDoc(collection(db,"quests"),{parentId:State.me.uid,title,reward,icon:$("#q-i").value,childId,repeat:$("#q-p").value,dueTime,ts:Date.now()});
   
-  // 알림 전송
   if(childId==="all"){
     State.kids.forEach(async k=>{
       await addDoc(collection(db,"notifications"),{senderId:State.me.uid,targetId:k.id,title:"새 퀘스트 도착! 📋",body:`${title} (${won(reward)})`,read:false,ts:Date.now()});
@@ -230,7 +229,7 @@ window.nudgeChild=async id=>{
   toast("자녀에게 알림을 보냈어요!");
 };
 
-// --- 자녀 전용 수행 함수 ---
+// --- 자녀 기능 ---
 window.submitReport=async id=>{
   const q=State.quests.find(x=>x.id===id);if(!q)return;
   const memo=prompt("부모님께 한마디 (비워도 돼요)","")??null;if(memo===null)return;
@@ -308,17 +307,35 @@ function parentView(){
   }
   if(State.tab==="kids"){
     h+=`<div class="card"><h3>연동 코드</h3><div class="mut">자녀가 가입 후 이 코드를 입력하면 연동돼요</div><div class="code">${esc(State.me.code)}</div></div>`;
-    h+=State.kids.length?State.kids.map(k=>{const l=getLvl(k.id);return `<div class="card"><div class="row"><h3>🧒 ${esc(k.name)}</h3><div class="won" style="text-align:right;font-size:22px">${won(getBal(k.id))}</div></div>
-      <div class="mut">Lv.${l.lv} ${l.name} · 누적 ${won(getEarned(k.id))} · 지급 ${won(getPaid(k.id))}</div>
-      <div class="row" style="margin-top:8px"><button class="b-go" onclick="payChild('${k.id}')">용돈 지급하기</button><button class="b-ghost" onclick="nudgeChild('${k.id}')">📲 콕! 찌르기</button></div></div>`}).join(""):`<div class="empty card">아직 연동된 자녀가 없어요.</div>`;
+    h+=State.kids.length?State.kids.map(k=>{
+      const l=getLvl(k.id);
+      const bal=getBal(k.id), earned=getEarned(k.id), paid=getPaid(k.id);
+      return `<div class="card"><div class="row"><h3>🧒 ${esc(k.name)}</h3><div style="text-align:right"><div class="won" style="font-size:20px">잔액: ${won(bal)}</div><div class="mut">누적: ${won(earned)} | 지급: ${won(paid)}</div></div></div>
+      <div class="mut" style="margin-top:6px">Lv.${l.lv} ${l.name}</div>
+      <div class="row" style="margin-top:8px"><button class="b-go" onclick="payChild('${k.id}')">용돈 지급하기</button><button class="b-ghost" onclick="nudgeChild('${k.id}')">📲 콕! 찌르기</button></div></div>`
+    }).join(""):`<div class="empty card">아직 연동된 자녀가 없어요.</div>`;
   }
   return h+`<nav class="tabs"><button class="${State.tab==="home"?"on":""}" onclick="switchTab('home')">✅ 승인${pend.length?`<span class="badge">${pend.length}</span>`:""}</button><button class="${State.tab==="quests"?"on":""}" onclick="switchTab('quests')">📋 퀘스트</button><button class="${State.tab==="kids"?"on":""}" onclick="switchTab('kids')">🧒 우리 아이</button></nav><div style="text-align:center;margin:20px 0"><button class="link" onclick="logout()">로그아웃</button></div>`;
 }
 
 function childView(){
-  const l=getLvl(State.me.uid),av=State.quests.filter(isQuestAvailable);
-  let h=`<div class="card hero"><div class="row"><div style="text-align:left"><h2>🧒 ${esc(State.me.name)}</h2><div class="mut" style="color:var(--ink)">Lv.${l.lv} ${l.name}</div></div><div class="won" style="text-align:right;font-size:26px">💰 ${won(getBal(State.me.uid))}</div></div>
-    <div class="bar" style="margin-top:8px" title="다음 레벨까지"><i style="width:${l.pr}%"></i></div></div>${renderNotifications()}${State.err?`<div class="err">${esc(State.err)}</div>`:""}`;
+  const l=getLvl(State.me.uid), av=State.quests.filter(isQuestAvailable);
+  const bal=getBal(State.me.uid), earned=getEarned(State.me.uid), paid=getPaid(State.me.uid);
+
+  let h=`<div class="card hero">
+    <div class="row">
+      <div style="text-align:left">
+        <h2>🧒 ${esc(State.me.name)}</h2>
+        <div class="mut" style="color:var(--ink)">Lv.${l.lv} ${l.name}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="won" style="font-size:22px">잔액: ${won(bal)}</div>
+        <div class="mut" style="font-size:12px;color:var(--ink);margin-top:2px">누적획득: ${won(earned)}</div>
+        <div class="mut" style="font-size:12px;color:var(--ink)">받은용돈: ${won(paid)}</div>
+      </div>
+    </div>
+    <div class="bar" style="margin-top:8px" title="다음 레벨까지"><i style="width:${l.pr}%"></i></div>
+  </div>${renderNotifications()}${State.err?`<div class="err">${esc(State.err)}</div>`:""}`;
   
   if(State.tab==="home"){
     h+=av.length?av.map(q=>`<div class="card quest"><div class="ic">${esc(q.icon)}</div><div style="flex:1"><div class="q-t">${esc(q.title)}</div>${q.dueTime?`<div class="mut" style="color:#d4380d">⏰ ${esc(q.dueTime)}</div>`:""}<div class="won">+${won(q.reward)}</div></div><button class="b-go fit" onclick="submitReport('${q.id}')">했어요!</button></div>`).join(""):`<div class="empty card">${State.quests.length?"오늘 할 수 있는 퀘스트를 모두 끝냈어요 🎉":"부모님이 퀘스트를 만들면 여기에 나타나요."}</div>`;
